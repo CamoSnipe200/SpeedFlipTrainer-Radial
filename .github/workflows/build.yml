@@ -22,7 +22,7 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          msbuild SpeedFlipTrainer.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 "/p:BakkesModPath=$env:BAKKESMOD_PATH" /fl "/flp:logfile=build.log;verbosity=minimal"
+          msbuild SpeedFlipTrainer.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:PostBuildEventUseInBuild=false "/p:BakkesModPath=$env:BAKKESMOD_PATH" /fl "/flp:logfile=build.log;verbosity=minimal"
           $code = $LASTEXITCODE
           # Surface errors as annotations so they can be read without the raw log
           Get-Content build.log | Where-Object { $_ -match ': (fatal )?error ' } | Select-Object -Unique -First 40 | ForEach-Object {
@@ -31,7 +31,18 @@ jobs:
           }
           exit $code
 
+      - name: Patch plugin for BakkesMod
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Copy-Item plugins/SpeedFlipTrainer.dll plugins/SpeedFlipTrainer.unpatched.dll
+          $out = & "$env:BAKKESMOD_PATH\bakkesmodsdk\bakkesmod-patch.exe" "$PWD\plugins\SpeedFlipTrainer.dll" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          foreach ($l in ($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 20)) { Write-Output "::warning::patch: $($l.Trim() -replace '%','%25')" }
+          Write-Output "::warning::patch exit code $code"
+          exit $code
+
       - uses: actions/upload-artifact@v4
         with:
           name: SpeedFlipTrainer-dll
-          path: plugins/SpeedFlipTrainer.dll
+          path: plugins/*.dll
