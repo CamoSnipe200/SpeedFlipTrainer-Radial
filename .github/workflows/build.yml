@@ -21,7 +21,15 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: msbuild SpeedFlipTrainer.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 "/p:BakkesModPath=$env:BAKKESMOD_PATH"
+        run: |
+          msbuild SpeedFlipTrainer.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 "/p:BakkesModPath=$env:BAKKESMOD_PATH" /fl "/flp:logfile=build.log;verbosity=minimal"
+          $code = $LASTEXITCODE
+          # Surface errors as annotations so they can be read without the raw log
+          Get-Content build.log | Where-Object { $_ -match ': (fatal )?error ' } | Select-Object -Unique -First 40 | ForEach-Object {
+            $line = $_ -replace '%','%25' -replace "`r",'' -replace "`n",''
+            Write-Output "::error::$line"
+          }
+          exit $code
 
       - uses: actions/upload-artifact@v4
         with:
