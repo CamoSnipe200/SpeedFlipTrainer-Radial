@@ -69,6 +69,23 @@ void SpeedFlipTrainer::Measure(CarWrapper car, std::shared_ptr<GameWrapper> game
 		LOG("First jump: " + to_string(currentTick) + " ticks");
 	}
 
+	// Count jump-button presses; on the second one, freeze where the stick is
+	bool jumpHeld = input.Jump != 0;
+	if (jumpHeld && !attempt.prevJumpHeld)
+	{
+		attempt.jumpPresses++;
+		if (attempt.jumpPresses == 2 && !attempt.stickRecorded)
+		{
+			attempt.stickRecorded = true;
+			attempt.stickX = input.Steer;
+			attempt.stickY = -input.Pitch;
+			attempt.stickAngle = (int)lroundf(atan2f(attempt.stickX, attempt.stickY) * (180.0f / (float)M_PI));
+			LOG("Stick at second jump: {0} deg (steer {1:.2f}, pitch {2:.2f}, yaw {3:.2f}, roll {4:.2f})",
+				attempt.stickAngle, input.Steer, input.Pitch, input.Yaw, input.Roll);
+		}
+	}
+	attempt.prevJumpHeld = jumpHeld;
+
 	if (!attempt.dodged && car.IsDodging())
 	{
 		attempt.dodged = true;
@@ -762,14 +779,18 @@ namespace
 		return AngleZone::Red;
 	}
 
-	void SetZoneColor(CanvasWrapper& canvas, AngleZone zone, float alpha)
+	// Filled triangles are drawn without transparency, so "dim" is done
+	// with darker colors rather than alpha.
+	void SetZoneColor(CanvasWrapper& canvas, AngleZone zone, bool bright)
 	{
-		char a = (char)(255 * alpha);
 		switch (zone)
 		{
-		case AngleZone::Green:  canvas.SetColor((char)50, (char)255, (char)50, a); break;
-		case AngleZone::Yellow: canvas.SetColor((char)255, (char)255, (char)50, a); break;
-		default:                canvas.SetColor((char)255, (char)50, (char)50, a); break;
+		case AngleZone::Green:
+			bright ? canvas.SetColor((char)60, (char)255, (char)60, (char)255) : canvas.SetColor((char)30, (char)95, (char)35, (char)255); break;
+		case AngleZone::Yellow:
+			bright ? canvas.SetColor((char)255, (char)235, (char)60, (char)255) : canvas.SetColor((char)100, (char)92, (char)30, (char)255); break;
+		default:
+			bright ? canvas.SetColor((char)255, (char)60, (char)60, (char)255) : canvas.SetColor((char)70, (char)32, (char)32, (char)255); break;
 		}
 	}
 
@@ -786,6 +807,12 @@ namespace
 		canvas.SetPosition(Vector2F{ center.X - size.X / 2, center.Y - size.Y / 2 });
 		canvas.DrawString(text, scale, scale, true, false);
 	}
+
+	void FillSquare(CanvasWrapper& canvas, Vector2F c, float half)
+	{
+		canvas.SetPosition(Vector2F{ c.X - half, c.Y - half });
+		canvas.FillBox(Vector2F{ half * 2, half * 2 });
+	}
 }
 
 void SpeedFlipTrainer::RenderStickCircle(CanvasWrapper canvas, float screenWidth, float screenHeight)
@@ -794,40 +821,31 @@ void SpeedFlipTrainer::RenderStickCircle(CanvasWrapper canvas, float screenWidth
 	const int rightTarget = *optimalRightAngle;
 
 	const float outerR = screenHeight * (*circleSize) / 100.f;
-	const float innerR = outerR * 0.62f;
+	const float innerR = outerR * 0.70f;
 	const Vector2F center{ screenWidth * (*circleX) / 100.f, screenHeight * (*circleY) / 100.f };
 
-	// Dark backing disc so the ring reads on any background
-	canvas.SetColor((char)0, (char)0, (char)0, (char)90);
-	const int discSteps = 72;
-	for (int i = 0; i < discSteps; i++)
-	{
-		float a0 = i * 360.0f / discSteps, a1 = (i + 1) * 360.0f / discSteps;
-		canvas.FillTriangle(center, PointAt(center, a0, outerR + 4), PointAt(center, a1, outerR + 4));
-	}
+	const bool haveDodge = attempt.dodged;
+	const float dodge = (float)attempt.dodgeAngle;
+	const AngleZone dodgeZone = ZoneForAngle(dodge, leftTarget, rightTarget);
 
-	// Work out which band of the ring the last dodge landed in, so it can be lit up
-	bool haveDodge = attempt.dodged;
-	float dodge = (float)attempt.dodgeAngle;
-	AngleZone dodgeZone = ZoneForAngle(dodge, leftTarget, rightTarget);
+	// Which stretch of the ring to light up: the zone the flip landed in
+	// (only a small wedge for red, since red covers most of the ring)
 	float bandLow = dodge, bandHigh = dodge;
 	if (haveDodge)
 	{
-		// Red covers most of the ring, so only light a wedge around the miss
 		const float maxSpread = dodgeZone == AngleZone::Red ? 12.0f : 360.0f;
 		while (bandLow > dodge - maxSpread && ZoneForAngle(bandLow - 1, leftTarget, rightTarget) == dodgeZone) bandLow -= 1;
 		while (bandHigh < dodge + maxSpread && ZoneForAngle(bandHigh + 1, leftTarget, rightTarget) == dodgeZone) bandHigh += 1;
 	}
 
-	// Colored ring, one degree per segment so the zone edges line up exactly
+	// Colored ring, one degree per segment so the zone edges line up exactly.
+	// Muted colors until a flip lights up its zone.
 	for (int deg = -180; deg < 180; deg++)
 	{
-		float a0 = (float)deg, a1 = (float)(deg + 1);
-		float mid = deg + 0.5f;
+		float a0 = (float)deg, a1 = (float)(deg + 1), mid = deg + 0.5f;
 		AngleZone zone = ZoneForAngle(mid, leftTarget, rightTarget);
-
 		bool lit = haveDodge && zone == dodgeZone && mid >= bandLow - 0.5f && mid <= bandHigh + 0.5f;
-		SetZoneColor(canvas, zone, lit ? 0.85f : (zone == AngleZone::Red ? 0.18f : 0.30f));
+		SetZoneColor(canvas, zone, lit);
 
 		Vector2F o0 = PointAt(center, a0, outerR), o1 = PointAt(center, a1, outerR);
 		Vector2F i0 = PointAt(center, a0, innerR), i1 = PointAt(center, a1, innerR);
@@ -835,55 +853,72 @@ void SpeedFlipTrainer::RenderStickCircle(CanvasWrapper canvas, float screenWidth
 		canvas.FillTriangle(o0, i1, i0);
 	}
 
-	// Ring outlines and white tick marks at each zone edge (like the bar meter)
-	canvas.SetColor((char)255, (char)255, (char)255, (char)200);
+	// Ring outlines and tick marks at each zone edge (like the bar meter)
+	canvas.SetColor((char)255, (char)255, (char)255, (char)170);
 	for (int deg = -180; deg < 180; deg += 3)
 	{
 		canvas.DrawLine(PointAt(center, (float)deg, outerR), PointAt(center, (float)(deg + 3), outerR), 2);
 		canvas.DrawLine(PointAt(center, (float)deg, innerR), PointAt(center, (float)(deg + 3), innerR), 1);
 	}
 	for (int target : { leftTarget, rightTarget })
-	{
 		for (int edge : { -15, -8, 8, 15 })
 			canvas.DrawLine(PointAt(center, (float)(target + edge), innerR), PointAt(center, (float)(target + edge), outerR), 2);
-	}
 
-	// Forward reference tick and labels
-	canvas.SetColor((char)255, (char)255, (char)255, (char)140);
-	canvas.DrawLine(PointAt(center, 0, innerR * 0.15f), PointAt(center, 0, innerR), 1);
+	// Faint forward guide and labels
+	canvas.SetColor((char)255, (char)255, (char)255, (char)90);
+	canvas.DrawLine(PointAt(center, 0, 4), PointAt(center, 0, innerR), 1);
 	canvas.SetColor((char)255, (char)255, (char)255, (char)230);
 	DrawCenteredString(canvas, "FWD", PointAt(center, 0, outerR + 14), 1.0f);
 	DrawCenteredString(canvas, "L", PointAt(center, -90, outerR + 14), 1.0f);
 	DrawCenteredString(canvas, "R", PointAt(center, 90, outerR + 14), 1.0f);
 
-	// Live stick position (left stick: Steer is X, pushing forward is negative Pitch)
-	float sx = liveInput.Steer, sy = -liveInput.Pitch;
-	float mag = sqrtf(sx * sx + sy * sy);
-	if (mag > 0.1f)
+	if (!haveDodge)
 	{
-		float liveAngle = atan2f(sx, sy) * 180.0f / (float)M_PI;
-		Vector2F p = PointAt(center, liveAngle, innerR * (std::min)(mag, 1.0f));
-		canvas.SetColor((char)255, (char)255, (char)255, (char)170);
-		canvas.SetPosition(Vector2F{ p.X - 4, p.Y - 4 });
-		canvas.FillBox(Vector2F{ 8, 8 });
+		// Before the flip: live stick dot so you can line up
+		float sx = liveInput.Steer, sy = -liveInput.Pitch;
+		float mag = sqrtf(sx * sx + sy * sy);
+		if (mag > 0.1f)
+		{
+			float liveAngle = atan2f(sx, sy) * 180.0f / (float)M_PI;
+			canvas.SetColor((char)255, (char)255, (char)255, (char)200);
+			FillSquare(canvas, PointAt(center, liveAngle, innerR * (std::min)(mag, 1.0f)), 4);
+		}
+		canvas.SetColor((char)255, (char)255, (char)255, (char)200);
+		DrawCenteredString(canvas, "FLIP -- DEG", Vector2F{ center.X, center.Y + outerR + 26 }, 1.5f);
+		return;
 	}
 
-	// The dodge line: where the stick was when you flipped
-	if (haveDodge)
+	// FLIP line: the direction the car actually flipped (thick, zone colored)
 	{
-		Vector2F from = PointAt(center, dodge, innerR * 0.15f);
-		Vector2F to = PointAt(center, dodge, outerR + 8);
-		canvas.SetColor((char)0, (char)0, (char)0, (char)220);
+		Vector2F from = PointAt(center, dodge, 4);
+		Vector2F to = PointAt(center, dodge, outerR + 10);
+		canvas.SetColor((char)0, (char)0, (char)0, (char)230);
 		canvas.DrawLine(from, to, 8);
-		SetZoneColor(canvas, dodgeZone, 1.0f);
+		SetZoneColor(canvas, dodgeZone, true);
 		canvas.DrawLine(from, to, 4);
 	}
 
-	// Readout under the circle
-	std::string label = haveDodge ? (std::to_string(attempt.dodgeAngle) + " DEG") : "-- DEG";
-	if (haveDodge)
-		SetZoneColor(canvas, dodgeZone, 1.0f);
-	else
-		canvas.SetColor((char)255, (char)255, (char)255, (char)200);
-	DrawCenteredString(canvas, label, Vector2F{ center.X, center.Y + outerR + 26 }, 1.5f);
+	// STICK marker: where the stick was on the frame you pressed the second jump
+	// (thin white line ending in a hollow square at how far the stick was pushed)
+	if (attempt.stickRecorded)
+	{
+		float mag = (std::min)(sqrtf(attempt.stickX * attempt.stickX + attempt.stickY * attempt.stickY), 1.0f);
+		float sa = (float)attempt.stickAngle;
+		Vector2F tip = PointAt(center, sa, innerR * mag);
+		canvas.SetColor((char)0, (char)0, (char)0, (char)200);
+		canvas.DrawLine(PointAt(center, sa, 4), tip, 4);
+		canvas.SetColor((char)255, (char)255, (char)255, (char)255);
+		canvas.DrawLine(PointAt(center, sa, 4), tip, 2);
+		canvas.SetPosition(Vector2F{ tip.X - 6, tip.Y - 6 });
+		canvas.DrawBox(Vector2F{ 12, 12 });
+		// Tick on the ring at the stick angle too
+		canvas.DrawLine(PointAt(center, sa, innerR - 2), PointAt(center, sa, outerR + 2), 2);
+	}
+
+	// Readouts under the circle
+	SetZoneColor(canvas, dodgeZone, true);
+	DrawCenteredString(canvas, "FLIP " + std::to_string(attempt.dodgeAngle) + " DEG", Vector2F{ center.X, center.Y + outerR + 26 }, 1.5f);
+	canvas.SetColor((char)255, (char)255, (char)255, (char)230);
+	std::string stickText = attempt.stickRecorded ? ("STICK " + std::to_string(attempt.stickAngle) + " DEG") : "STICK --";
+	DrawCenteredString(canvas, stickText, Vector2F{ center.X, center.Y + outerR + 48 }, 1.2f);
 }

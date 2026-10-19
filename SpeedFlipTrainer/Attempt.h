@@ -27,6 +27,13 @@ public:
 	int dodgedTick = 0;
 	bool dodged = false;
 
+	// Stick position on the frame the second jump (the dodge) was pressed
+	int jumpPresses = 0;
+	bool prevJumpHeld = false;
+	bool stickRecorded = false;
+	float stickX = 0, stickY = 0;
+	int stickAngle = 0;
+
 	// Variable to keep track of Y position
 	float positionY = -1.1;
 	float traveledY = 0;
