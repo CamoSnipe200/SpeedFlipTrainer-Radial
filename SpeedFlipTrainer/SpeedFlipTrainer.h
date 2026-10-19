@@ -35,6 +35,15 @@ private:
 	shared_ptr<bool> showPositionMeter = make_shared<bool>(true);
 	shared_ptr<bool> showFlipMeter = make_shared<bool>(true);
 	shared_ptr<bool> showJumpMeter = make_shared<bool>(true);
+	shared_ptr<bool> showStickCircle = make_shared<bool>(true);
+
+	// Stick circle placement (percent of screen) and size (percent of screen height)
+	shared_ptr<float> circleX = make_shared<float>(14.0f);
+	shared_ptr<float> circleY = make_shared<float>(60.0f);
+	shared_ptr<float> circleSize = make_shared<float>(13.0f);
+
+	// Most recent stick input during the current attempt (for the live dot)
+	ControllerInput liveInput;
 
 	// Whether the speed should be changed on consecutive hits and misses
 	shared_ptr<bool> changeSpeed = make_shared<bool>(false);
@@ -114,6 +123,7 @@ private:
 	void RenderFlipCancelMeter(CanvasWrapper canvas, float screenWidth, float screenHeight);
 	void RenderFirstJumpMeter(CanvasWrapper canvas, float screenWidth, float screenHeight);
 	void RenderPositionMeter(CanvasWrapper canvas, float screenWidth, float screenHeight);
+	void RenderStickCircle(CanvasWrapper canvas, float screenWidth, float screenHeight);
 
 	// Inherited via PluginWindow
 	bool isWindowOpen_ = false;

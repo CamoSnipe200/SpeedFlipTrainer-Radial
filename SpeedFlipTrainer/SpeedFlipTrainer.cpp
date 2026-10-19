@@ -126,6 +126,9 @@ void SpeedFlipTrainer::Hook()
 		else if (mode == SpeedFlipTrainerMode::Replay)
 			PlayAttempt(&replayAttempt, gameWrapper, input);
 
+		// Remember the latest stick position for the stick circle's live dot
+		liveInput = *input;
+
 		// Has time started counting down?
 		float timeLeft = gameWrapper->GetCurrentGameState().GetGameTimeRemaining();
 		int currentFrame = gameWrapper->GetEngine().GetPhysicsFrame();
@@ -263,6 +266,10 @@ void SpeedFlipTrainer::onLoad()
 	cvarManager->registerCvar("sf_show_position", "1", "Show horizontal position meter.", true, false, 0, false, 0, true).bindTo(showPositionMeter);
 	cvarManager->registerCvar("sf_show_jump", "1", "Show jump meter.", true, false, 0, false, 0, true).bindTo(showJumpMeter);
 	cvarManager->registerCvar("sf_show_flip", "1", "Show flip cancel meter.", true, false, 0, false, 0, true).bindTo(showFlipMeter);
+	cvarManager->registerCvar("sf_show_circle", "1", "Show stick angle circle.", true, false, 0, false, 0, true).bindTo(showStickCircle);
+	cvarManager->registerCvar("sf_circle_x", "14", "Stick circle horizontal position (% of screen width).", true, true, 0, true, 100, true).bindTo(circleX);
+	cvarManager->registerCvar("sf_circle_y", "60", "Stick circle vertical position (% of screen height).", true, true, 0, true, 100, true).bindTo(circleY);
+	cvarManager->registerCvar("sf_circle_size", "13", "Stick circle radius (% of screen height).", true, true, 5, true, 30, true).bindTo(circleSize);
 
 	//cvarManager->registerCvar("sf_jump_low", "40", "Low threshold for first jump of speedflip.", true, true, 10, true, 110, false).bindTo(jumpLow);
 	//cvarManager->registerCvar("sf_jump_high", "90", "High threshold for first jump of speedflip.", true, true, 20, true, 120, false).bindTo(jumpHigh);
@@ -355,6 +362,9 @@ void SpeedFlipTrainer::RenderMeters(CanvasWrapper canvas)
 
 	if(*showJumpMeter)
 		RenderFirstJumpMeter(canvas, SCREENWIDTH, SCREENHEIGHT);
+
+	if(*showStickCircle)
+		RenderStickCircle(canvas, SCREENWIDTH, SCREENHEIGHT);
 }
 
 void SpeedFlipTrainer::RenderPositionMeter(CanvasWrapper canvas, float screenWidth, float screenHeight)
@@ -729,4 +739,151 @@ void SpeedFlipTrainer::PlayBot(shared_ptr<GameWrapper> gameWrapper, ControllerIn
 	bot.Play(ci, tick);
 
 	gameWrapper->OverrideParams(ci, sizeof(ControllerInput));
+}
+
+// ---------------------------------------------------------------------------
+// Stick circle: the dodge angle drawn on a joystick-style ring.
+// 0 deg is straight up (forward), negative angles are left, positive are right,
+// matching the angle used by the bar meter at the bottom of the screen.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	enum class AngleZone { Red, Yellow, Green };
+
+	// Same thresholds as the bar meter: within 8 deg of a target is green,
+	// within 15 deg is yellow, everything else is red.
+	AngleZone ZoneForAngle(float angle, int leftTarget, int rightTarget)
+	{
+		const float greenRange = 8.0f, yellowRange = 15.0f;
+		float d = (std::min)(fabsf(angle - leftTarget), fabsf(angle - rightTarget));
+		if (d <= greenRange) return AngleZone::Green;
+		if (d <= yellowRange) return AngleZone::Yellow;
+		return AngleZone::Red;
+	}
+
+	void SetZoneColor(CanvasWrapper& canvas, AngleZone zone, float alpha)
+	{
+		char a = (char)(255 * alpha);
+		switch (zone)
+		{
+		case AngleZone::Green:  canvas.SetColor((char)50, (char)255, (char)50, a); break;
+		case AngleZone::Yellow: canvas.SetColor((char)255, (char)255, (char)50, a); break;
+		default:                canvas.SetColor((char)255, (char)50, (char)50, a); break;
+		}
+	}
+
+	// Point on the circle for a given angle (deg, clockwise from up) and radius
+	Vector2F PointAt(Vector2F center, float angleDeg, float radius)
+	{
+		float rad = angleDeg * (float)M_PI / 180.0f;
+		return Vector2F{ center.X + radius * sinf(rad), center.Y - radius * cosf(rad) };
+	}
+
+	void DrawCenteredString(CanvasWrapper& canvas, const std::string& text, Vector2F center, float scale)
+	{
+		Vector2F size = canvas.GetStringSize(text, scale, scale);
+		canvas.SetPosition(Vector2F{ center.X - size.X / 2, center.Y - size.Y / 2 });
+		canvas.DrawString(text, scale, scale, true, false);
+	}
+}
+
+void SpeedFlipTrainer::RenderStickCircle(CanvasWrapper canvas, float screenWidth, float screenHeight)
+{
+	const int leftTarget = *optimalLeftAngle;
+	const int rightTarget = *optimalRightAngle;
+
+	const float outerR = screenHeight * (*circleSize) / 100.f;
+	const float innerR = outerR * 0.62f;
+	const Vector2F center{ screenWidth * (*circleX) / 100.f, screenHeight * (*circleY) / 100.f };
+
+	// Dark backing disc so the ring reads on any background
+	canvas.SetColor((char)0, (char)0, (char)0, (char)90);
+	const int discSteps = 72;
+	for (int i = 0; i < discSteps; i++)
+	{
+		float a0 = i * 360.0f / discSteps, a1 = (i + 1) * 360.0f / discSteps;
+		canvas.FillTriangle(center, PointAt(center, a0, outerR + 4), PointAt(center, a1, outerR + 4));
+	}
+
+	// Work out which band of the ring the last dodge landed in, so it can be lit up
+	bool haveDodge = attempt.dodged;
+	float dodge = (float)attempt.dodgeAngle;
+	AngleZone dodgeZone = ZoneForAngle(dodge, leftTarget, rightTarget);
+	float bandLow = dodge, bandHigh = dodge;
+	if (haveDodge)
+	{
+		// Red covers most of the ring, so only light a wedge around the miss
+		const float maxSpread = dodgeZone == AngleZone::Red ? 12.0f : 360.0f;
+		while (bandLow > dodge - maxSpread && ZoneForAngle(bandLow - 1, leftTarget, rightTarget) == dodgeZone) bandLow -= 1;
+		while (bandHigh < dodge + maxSpread && ZoneForAngle(bandHigh + 1, leftTarget, rightTarget) == dodgeZone) bandHigh += 1;
+	}
+
+	// Colored ring, one degree per segment so the zone edges line up exactly
+	for (int deg = -180; deg < 180; deg++)
+	{
+		float a0 = (float)deg, a1 = (float)(deg + 1);
+		float mid = deg + 0.5f;
+		AngleZone zone = ZoneForAngle(mid, leftTarget, rightTarget);
+
+		bool lit = haveDodge && zone == dodgeZone && mid >= bandLow - 0.5f && mid <= bandHigh + 0.5f;
+		SetZoneColor(canvas, zone, lit ? 0.85f : (zone == AngleZone::Red ? 0.18f : 0.30f));
+
+		Vector2F o0 = PointAt(center, a0, outerR), o1 = PointAt(center, a1, outerR);
+		Vector2F i0 = PointAt(center, a0, innerR), i1 = PointAt(center, a1, innerR);
+		canvas.FillTriangle(o0, o1, i1);
+		canvas.FillTriangle(o0, i1, i0);
+	}
+
+	// Ring outlines and white tick marks at each zone edge (like the bar meter)
+	canvas.SetColor((char)255, (char)255, (char)255, (char)200);
+	for (int deg = -180; deg < 180; deg += 3)
+	{
+		canvas.DrawLine(PointAt(center, (float)deg, outerR), PointAt(center, (float)(deg + 3), outerR), 2);
+		canvas.DrawLine(PointAt(center, (float)deg, innerR), PointAt(center, (float)(deg + 3), innerR), 1);
+	}
+	for (int target : { leftTarget, rightTarget })
+	{
+		for (int edge : { -15, -8, 8, 15 })
+			canvas.DrawLine(PointAt(center, (float)(target + edge), innerR), PointAt(center, (float)(target + edge), outerR), 2);
+	}
+
+	// Forward reference tick and labels
+	canvas.SetColor((char)255, (char)255, (char)255, (char)140);
+	canvas.DrawLine(PointAt(center, 0, innerR * 0.15f), PointAt(center, 0, innerR), 1);
+	canvas.SetColor((char)255, (char)255, (char)255, (char)230);
+	DrawCenteredString(canvas, "FWD", PointAt(center, 0, outerR + 14), 1.0f);
+	DrawCenteredString(canvas, "L", PointAt(center, -90, outerR + 14), 1.0f);
+	DrawCenteredString(canvas, "R", PointAt(center, 90, outerR + 14), 1.0f);
+
+	// Live stick position (left stick: Steer is X, pushing forward is negative Pitch)
+	float sx = liveInput.Steer, sy = -liveInput.Pitch;
+	float mag = sqrtf(sx * sx + sy * sy);
+	if (mag > 0.1f)
+	{
+		float liveAngle = atan2f(sx, sy) * 180.0f / (float)M_PI;
+		Vector2F p = PointAt(center, liveAngle, innerR * (std::min)(mag, 1.0f));
+		canvas.SetColor((char)255, (char)255, (char)255, (char)170);
+		canvas.SetPosition(Vector2F{ p.X - 4, p.Y - 4 });
+		canvas.FillBox(Vector2F{ 8, 8 });
+	}
+
+	// The dodge line: where the stick was when you flipped
+	if (haveDodge)
+	{
+		Vector2F from = PointAt(center, dodge, innerR * 0.15f);
+		Vector2F to = PointAt(center, dodge, outerR + 8);
+		canvas.SetColor((char)0, (char)0, (char)0, (char)220);
+		canvas.DrawLine(from, to, 8);
+		SetZoneColor(canvas, dodgeZone, 1.0f);
+		canvas.DrawLine(from, to, 4);
+	}
+
+	// Readout under the circle
+	std::string label = haveDodge ? (std::to_string(attempt.dodgeAngle) + " DEG") : "-- DEG";
+	if (haveDodge)
+		SetZoneColor(canvas, dodgeZone, 1.0f);
+	else
+		canvas.SetColor((char)255, (char)255, (char)255, (char)200);
+	DrawCenteredString(canvas, label, Vector2F{ center.X, center.Y + outerR + 26 }, 1.5f);
 }

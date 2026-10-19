@@ -55,6 +55,33 @@ void SpeedFlipTrainer::RenderSettings() {
 		rightAngleCvar.setValue(rightAngle);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("The optimal angle at which to dodge right.");
+	// ------------------------ STICK CIRCLE ----------------------------------
+	ImGui::Separator();
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_show_circle");
+		if (!cvar) return;
+
+		bool value = cvar.getBoolValue();
+
+		if (ImGui::Checkbox("Show stick angle circle", &value))
+			cvar.setValue(value);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Show the dodge angle on a joystick-style circle. Uses the same optimal angles as above.");
+	}
+	{
+		const char* names[] = { "sf_circle_x", "sf_circle_y", "sf_circle_size" };
+		const char* labels[] = { "Circle position X (%)", "Circle position Y (%)", "Circle size (%)" };
+		const float mins[] = { 0.0f, 0.0f, 5.0f };
+		const float maxs[] = { 100.0f, 100.0f, 30.0f };
+		for (int i = 0; i < 3; i++)
+		{
+			CVarWrapper cvar = cvarManager->getCvar(names[i]);
+			if (!cvar) continue;
+			float v = cvar.getFloatValue();
+			if (ImGui::SliderFloat(labels[i], &v, mins[i], maxs[i], "%.0f"))
+				cvar.setValue(v);
+		}
+	}
 	// ------------------------ FLIP CANCEL ----------------------------------
 	ImGui::Separator();
 	{
