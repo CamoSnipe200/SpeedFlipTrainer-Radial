@@ -1,0 +1,29 @@
+name: Build plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get BakkesMod SDK
+        shell: pwsh
+        run: |
+          $bm = Join-Path $env:RUNNER_TEMP "bakkesmod"
+          git clone --depth 1 https://github.com/bakkesmodorg/BakkesModSDK.git (Join-Path $bm "bakkesmodsdk")
+          "BAKKESMOD_PATH=$bm" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        shell: pwsh
+        run: msbuild SpeedFlipTrainer.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 "/p:BakkesModPath=$env:BAKKESMOD_PATH"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeedFlipTrainer-dll
+          path: plugins/SpeedFlipTrainer.dll
