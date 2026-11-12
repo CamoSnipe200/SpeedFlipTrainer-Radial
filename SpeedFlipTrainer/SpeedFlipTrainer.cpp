@@ -2,6 +2,7 @@
 #include "SpeedFlipTrainer.h"
 #include "RenderMeter.h"
 #include <array>
+#include <cctype>
 #include "BotAttempt.h"
 
 #define _USE_MATH_DEFINES
@@ -58,9 +59,20 @@ void SpeedFlipTrainer::Measure(CarWrapper car, std::shared_ptr<GameWrapper> game
 	ControllerInput input = car.GetInput();
 	attempt.Record(currentTick, input);
 
+	// Sideways drift. Musty's shot drives along X, so that's just Y.
+	// For kickoff spawns it's the offset from the spawn -> ball line.
 	auto loc = car.GetLocation();
-	attempt.traveledY += abs(loc.Y - attempt.positionY);
-	attempt.positionY = loc.Y;
+	float lateral = loc.Y;
+	if (packMode == PackMode::Kickoff && kickoffSpawn >= 0)
+	{
+		const KickoffSpawn& s = KICKOFF_SPAWNS[kickoffSpawn];
+		float len = sqrtf(s.x * s.x + s.y * s.y);
+		float dx = -s.x / len, dy = -s.y / len;              // unit vector spawn -> ball
+		float right = (loc.X - s.x) * (-dy) + (loc.Y - s.y) * dx; // offset to the car's right
+		lateral = -right;                                     // position meter draws -positionY
+	}
+	attempt.traveledY += abs(lateral - attempt.positionY);
+	attempt.positionY = lateral;
 
 	if (!attempt.jumped && car.GetbJumped())
 	{
@@ -122,7 +134,9 @@ void SpeedFlipTrainer::Hook()
 	LOG("Hooking");
 	gameWrapper->RegisterDrawable(bind(&SpeedFlipTrainer::RenderMeters, this, std::placeholders::_1));
 
-	if (*rememberSpeed)
+	// In kickoff mode this waits until a round is actually on a kickoff spawn,
+	// so auto-detect doesn't slow down unrelated packs
+	if (*rememberSpeed && packMode == PackMode::Musty)
 		_globalCvarManager->getCvar("sv_soccar_gamespeed").setValue(*speed);
 
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
@@ -133,7 +147,16 @@ void SpeedFlipTrainer::Hook()
 		if (car.IsNull())
 			return;
 
-		if (*rememberSpeed)
+		// Kickoff mode: snap car/ball for the first few ticks of the round
+		if (packMode == PackMode::Kickoff && startingPhysicsFrame < 0 && prepTicks < KICKOFF_PREP_TICKS)
+		{
+			PrepareKickoffRound(car);
+			prepTicks++;
+		}
+		if (packMode == PackMode::Kickoff && kickoffSpawn < 0)
+			return; // not a kickoff shot
+
+		if (*rememberSpeed && (packMode == PackMode::Musty || speedRestored))
 			*(this->speed) = _globalCvarManager->getCvar("sv_soccar_gamespeed").getFloatValue();
 
 		auto input = (ControllerInput*)params;
@@ -149,10 +172,19 @@ void SpeedFlipTrainer::Hook()
 		// Has time started counting down?
 		float timeLeft = gameWrapper->GetCurrentGameState().GetGameTimeRemaining();
 		int currentFrame = gameWrapper->GetEngine().GetPhysicsFrame();
-		if (initialTime <= 0 || timeLeft == initialTime) // if we have no time OR countdown hasn't started just return
-			return;
-		if (startingPhysicsFrame < 0 && timeLeft < initialTime) // if this is the first frame the countdown has begun
+		if (startingPhysicsFrame < 0)
 		{
+			if (initialTime <= 0) // no time on the clock
+				return;
+			if (timeLeft > initialTime) // game reset the clock after Restart
+			{
+				initialTime = timeLeft;
+				return;
+			}
+			if (timeLeft == initialTime) // countdown hasn't started
+				return;
+
+			// first frame the countdown has begun
 			startingPhysicsFrame = currentFrame;
 
 			attempt = Attempt();
@@ -162,7 +194,42 @@ void SpeedFlipTrainer::Hook()
 
 			if (!input->ActivateBoost)
 				attempt.startedNoBoost = true;
+
+			if (packMode == PackMode::Kickoff)
+			{
+				attempt.positionY = 0;
+				timeLimit = LimitForSpawn(KICKOFF_SPAWNS[kickoffSpawn]);
+				LOG("Kickoff attempt from {0}, limit {1:.2f}s", KICKOFF_SPAWNS[kickoffSpawn].name, timeLimit);
+			}
+			else
+			{
+				timeLimit = initialTime;
+
+				// Remember Musty's timer and distance so kickoff limits can be calibrated to it
+				ServerWrapper server = gameWrapper->GetGameEventAsServer();
+				if (!server.IsNull())
+				{
+					BallWrapper ball = server.GetBall();
+					if (!ball.IsNull())
+					{
+						float d = distance(car.GetLocation(), ball.GetLocation());
+						if (d > 2500)
+						{
+							_globalCvarManager->getCvar("sf_musty_time").setValue(initialTime);
+							_globalCvarManager->getCvar("sf_musty_dist").setValue(d);
+							LOG("Musty's shot: {0:.3f}s over {1:.0f}uu -> corner {2:.2f}s, off-center {3:.2f}s, back center {4:.2f}s",
+								initialTime, d,
+								initialTime + (KICKOFF_DIST_CORNER - d) / KICKOFF_MAX_SPEED,
+								initialTime + (KICKOFF_DIST_OFFCENTER - d) / KICKOFF_MAX_SPEED,
+								initialTime + (KICKOFF_DIST_CENTER - d) / KICKOFF_MAX_SPEED);
+						}
+					}
+				}
+			}
 		}
+
+		if (packMode == PackMode::Kickoff && !attempt.hit && !attempt.exploded)
+			EnforceKickoffLimit(currentFrame, timeLeft);
 
 		// ball hasn't exploded or been hit yet
 		if (!attempt.exploded && !attempt.hit)
@@ -175,20 +242,39 @@ void SpeedFlipTrainer::Hook()
 		[this](std::string eventname) {
 		if (!*enabled || !loaded || !gameWrapper->IsInCustomTraining() || attempt.hit || attempt.exploded)
 			return;
+		if (!RoundActive() || startingPhysicsFrame < 0)
+			return;
 
 		attempt.ticksToBall = gameWrapper->GetLocalCar().GetLastBallImpactFrame() - startingPhysicsFrame;
-		attempt.timeToBall = initialTime - gameWrapper->GetCurrentGameState().GetGameTimeRemaining();
 		attempt.hit = true;
+		attempt.reached = true;
+		if (packMode == PackMode::Kickoff)
+		{
+			// The clock is being clamped, so time it from physics ticks
+			attempt.timeToBall = attempt.ticksToBall / 120.0f;
+			attempt.passed = !attempt.timedOut && attempt.ticksToBall <= (int)lroundf(timeLimit * 120.0f);
+		}
+		else
+		{
+			attempt.timeToBall = initialTime - gameWrapper->GetCurrentGameState().GetGameTimeRemaining();
+			attempt.passed = true; // the pack's own timer is the limit: a touch means you made it
+		}
 		LOG("Time to ball: {0:.3f}s after {1} tick", attempt.timeToBall, attempt.ticksToBall);
 	});
 
 	gameWrapper->HookEvent("Function TAGame.Ball_TA.Explode", 
 		[this](std::string eventName) {
-		if (!*enabled || !loaded || !gameWrapper->IsInCustomTraining())
+		if (!*enabled || !loaded || !gameWrapper->IsInCustomTraining() || !RoundActive())
 			return;
 
 		auto ball = gameWrapper->GetGameEventAsServer().GetBall();
 		auto car = gameWrapper->GetGameEventAsServer().GetLocalPrimaryPlayer();
+		if (ball.IsNull() || car.IsNull())
+		{
+			attempt.exploded = true;
+			attempt.hit = false;
+			return;
+		}
 
 		auto distanceToBall = distance(ball.GetLocation(), car.GetLocation());
 		auto meters = (distanceToBall / 100.0) - 4.8; // account for car distance
@@ -203,12 +289,21 @@ void SpeedFlipTrainer::Hook()
 		if (!*enabled || !loaded || !gameWrapper->IsInCustomTraining())
 			return;
 
-		//gameWrapper->GetCurrentGameState().SetGameTimeRemaining(2.14);
 		initialTime = gameWrapper->GetCurrentGameState().GetGameTimeRemaining();
 		ticksBeforeTimeExpired = initialTime * 120;
-		startingPhysicsFrame = -1;
 
-		if (attempt.hit && !attempt.exploded)
+		// A reset in kickoff mode on a non-kickoff shot (or before the car moved) isn't an attempt
+		bool countIt = RoundActive() && startingPhysicsFrame >= 0;
+		startingPhysicsFrame = -1;
+		if (packMode == PackMode::Kickoff)
+		{
+			prepTicks = 0;
+			kickoffSpawn = -1;
+		}
+		if (!countIt && packMode == PackMode::Kickoff)
+			return;
+
+		if (AttemptSucceeded())
 		{
 			consecutiveHits++;
 			consecutiveMiss = 0;
@@ -288,14 +383,50 @@ void SpeedFlipTrainer::onLoad()
 	cvarManager->registerCvar("sf_circle_y", "60", "Stick circle vertical position (% of screen height).", true, true, 0, true, 100, true).bindTo(circleY);
 	cvarManager->registerCvar("sf_circle_size", "13", "Stick circle radius (% of screen height).", true, true, 5, true, 30, true).bindTo(circleSize);
 
+	cvarManager->registerCvar("sf_kickoff_enabled", "1", "Support training packs with shots on the standard kickoff spawns.", true, false, 0, false, 0, true).bindTo(kickoffEnabled);
+	cvarManager->registerCvar("sf_kickoff_autodetect", "1", "Treat any training shot that starts on a kickoff spawn (ball at center) as a kickoff shot.", true, false, 0, false, 0, true).bindTo(kickoffAutodetect);
+	cvarManager->registerCvar("sf_kickoff_pack_code", "", "Code of your kickoff-spawns training pack.", true, false, 0, false, 0, true).bindTo(kickoffPackCode);
+	cvarManager->registerCvar("sf_kickoff_snap", "1", "Snap the car and ball to the exact kickoff spot.", true, false, 0, false, 0, true).bindTo(kickoffSnap);
+	cvarManager->registerCvar("sf_kickoff_snap_radius", "400", "How close (uu) the car must start to a kickoff spawn.", true, true, 50, true, 1000, true).bindTo(kickoffSnapRadius);
+	cvarManager->registerCvar("sf_kickoff_time_corner", "2.00", "Time limit (s) to reach the ball from a corner kickoff.", true, true, 1.0, true, 5.0, true).bindTo(timeCorner);
+	cvarManager->registerCvar("sf_kickoff_time_offcenter", "2.25", "Time limit (s) to reach the ball from an off-center kickoff.", true, true, 1.0, true, 5.0, true).bindTo(timeOffCenter);
+	cvarManager->registerCvar("sf_kickoff_time_center", "2.58", "Time limit (s) to reach the ball from the back-center kickoff.", true, true, 1.0, true, 5.0, true).bindTo(timeCenter);
+	cvarManager->registerCvar("sf_musty_time", "0", "Shot timer of Musty's pack (recorded automatically).", true, false, 0, false, 0, true).bindTo(mustyTime);
+	cvarManager->registerCvar("sf_musty_dist", "0", "Car-to-ball distance in Musty's pack (recorded automatically).", true, false, 0, false, 0, true).bindTo(mustyDist);
+
 	//cvarManager->registerCvar("sf_jump_low", "40", "Low threshold for first jump of speedflip.", true, true, 10, true, 110, false).bindTo(jumpLow);
 	//cvarManager->registerCvar("sf_jump_high", "90", "High threshold for first jump of speedflip.", true, true, 20, true, 120, false).bindTo(jumpHigh);
 
 	if (*enabled)
 	{
 		gameWrapper->HookEventWithCaller<ActorWrapper>("Function TAGame.GameEvent_TrainingEditor_TA.LoadRound", [this](ActorWrapper cw, void* params, std::string eventName) {
-			if (!*enabled || !IsMustysPack((TrainingEditorWrapper)cw.memory_address))
+			if (!*enabled)
 				return;
+
+			std::string code = GetPackCode((TrainingEditorWrapper)cw.memory_address);
+			if (code == "A503-264C-A7EB-D282")
+			{
+				packMode = PackMode::Musty;
+			}
+			else if (*kickoffEnabled)
+			{
+				auto normalize = [](std::string s) {
+					std::string out;
+					for (char c : s)
+						if (!isspace((unsigned char)c))
+							out += (char)toupper((unsigned char)c);
+					return out;
+				};
+				std::string mine = normalize(*kickoffPackCode);
+				bool isMine = !mine.empty() && normalize(code) == mine;
+				if (!isMine && !*kickoffAutodetect)
+					return;
+				packMode = PackMode::Kickoff;
+			}
+			else
+			{
+				return;
+			}
 			Hook();
 		});
 
@@ -333,9 +464,14 @@ void SpeedFlipTrainer::onUnload()
 	gameWrapper->UnhookEvent("Function TAGame.Ball_TA.Explode");
 	gameWrapper->UnhookEventPost("Function Engine.Controller.Restart"); 
 	gameWrapper->UnregisterDrawables();
+
+	packMode = PackMode::None;
+	kickoffSpawn = -1;
+	prepTicks = 0;
+	speedRestored = false;
 }
 
-bool SpeedFlipTrainer::IsMustysPack(TrainingEditorWrapper tw)
+std::string SpeedFlipTrainer::GetPackCode(TrainingEditorWrapper tw)
 {
 	if (!tw.IsNull())
 	{
@@ -343,27 +479,144 @@ bool SpeedFlipTrainer::IsMustysPack(TrainingEditorWrapper tw)
 		if (!data.IsNull())
 		{
 			TrainingEditorSaveDataWrapper td = data.GetTrainingData();
-			if (!td.IsNull())
-			{
-				if (!td.GetCode().IsNull())
-				{
-					auto code = td.GetCode().ToString();
-					if (code == "A503-264C-A7EB-D282")
-					{
-						return true;
-					}
-				}
-			}
+			if (!td.IsNull() && !td.GetCode().IsNull())
+				return td.GetCode().ToString();
 		}
 	}
-	return false;
+	return "";
+}
+
+bool SpeedFlipTrainer::IsMustysPack(TrainingEditorWrapper tw)
+{
+	return GetPackCode(tw) == "A503-264C-A7EB-D282";
+}
+
+bool SpeedFlipTrainer::RoundActive()
+{
+	if (packMode == PackMode::Kickoff)
+		return kickoffSpawn >= 0;
+	return packMode == PackMode::Musty;
+}
+
+bool SpeedFlipTrainer::AttemptSucceeded()
+{
+	if (packMode == PackMode::Kickoff)
+		return attempt.passed;
+	return attempt.hit && !attempt.exploded;
+}
+
+float SpeedFlipTrainer::LimitForSpawn(const KickoffSpawn& s)
+{
+	switch (s.type)
+	{
+	case KickoffType::Corner: return *timeCorner;
+	case KickoffType::OffCenter: return *timeOffCenter;
+	default: return *timeCenter;
+	}
+}
+
+void SpeedFlipTrainer::PrepareKickoffRound(CarWrapper car)
+{
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (server.IsNull())
+		return;
+	BallWrapper ball = server.GetBall();
+	if (ball.IsNull())
+		return;
+
+	// Nearest kickoff spawn to where the shot put the car
+	Vector loc = car.GetLocation();
+	int best = -1;
+	float bestDist = 1e9f;
+	for (int i = 0; i < (int)KICKOFF_SPAWNS.size(); i++)
+	{
+		float d = sqrtf(powf(loc.X - KICKOFF_SPAWNS[i].x, 2) + powf(loc.Y - KICKOFF_SPAWNS[i].y, 2));
+		if (d < bestDist)
+		{
+			bestDist = d;
+			best = i;
+		}
+	}
+
+	Vector b = ball.GetLocation();
+	float ballOff = sqrtf(b.X * b.X + b.Y * b.Y);
+	if (best < 0 || bestDist > *kickoffSnapRadius || ballOff > 500.0f)
+	{
+		kickoffSpawn = -1;
+		if (prepTicks == 0 && best >= 0)
+			LOG("Not a kickoff shot: nearest spawn {0} is {1:.0f}uu away, ball {2:.0f}uu from center", KICKOFF_SPAWNS[best].name, bestDist, ballOff);
+		return;
+	}
+
+	const KickoffSpawn& s = KICKOFF_SPAWNS[best];
+	kickoffSpawn = best;
+
+	if (prepTicks == 0)
+		LOG("Kickoff spawn: {0}, was {1:.0f}uu off", s.name, bestDist);
+
+	if (!speedRestored)
+	{
+		speedRestored = true;
+		if (*rememberSpeed)
+			_globalCvarManager->getCvar("sv_soccar_gamespeed").setValue(*speed);
+	}
+
+	if (*kickoffSnap)
+	{
+		// Keep Z so the car still settles onto the ground normally
+		car.SetLocation(Vector(s.x, s.y, loc.Z));
+		car.SetCarRotation(Rotator(0, s.yaw, 0));
+		Vector v = car.GetVelocity();
+		car.SetVelocity(Vector(0, 0, v.Z));
+		car.SetAngularVelocity(Vector(0, 0, 0), false);
+
+		ball.SetLocation(Vector(0, 0, b.Z));
+		ball.SetVelocity(Vector(0, 0, 0));
+		ball.SetAngularVelocity(Vector(0, 0, 0), false);
+	}
+}
+
+void SpeedFlipTrainer::EnforceKickoffLimit(int currentFrame, float timeLeft)
+{
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (server.IsNull())
+		return;
+
+	int elapsed = currentFrame - startingPhysicsFrame;
+	int limitTicks = (int)lroundf(timeLimit * 120.0f);
+
+	if (elapsed >= limitTicks)
+	{
+		if (!attempt.timedOut)
+		{
+			// Let the game end the shot its own way (ball explodes)
+			attempt.timedOut = true;
+			server.SetGameTimeRemaining(0.0f);
+			LOG("Too slow: no touch within {0:.2f}s", timeLimit);
+		}
+		else if (elapsed >= limitTicks + KICKOFF_EXPLODE_GRACE_TICKS && !attempt.exploded)
+		{
+			// The game didn't end it, so make the ball disappear ourselves
+			BallWrapper ball = server.GetBall();
+			if (!ball.IsNull())
+				ball.DoExplode();
+			attempt.exploded = true;
+		}
+	}
+	else
+	{
+		// Keep the shot clock showing the time left to make it
+		float want = (limitTicks - elapsed) / 120.0f;
+		if (timeLeft > want + 0.02f)
+			server.SetGameTimeRemaining(want);
+	}
 }
 
 void SpeedFlipTrainer::RenderMeters(CanvasWrapper canvas)
 {
 	bool training = gameWrapper->IsInCustomTraining();
 
-	if (!*enabled || !loaded || !training) return;
+	if (!*enabled || !loaded || !training || !RoundActive()) return;
 
 	float SCREENWIDTH = canvas.GetSize().X;
 	float SCREENHEIGHT = canvas.GetSize().Y;
@@ -429,7 +682,17 @@ void SpeedFlipTrainer::RenderPositionMeter(CanvasWrapper canvas, float screenWid
 
 	RenderMeter(canvas, startPos, reqSize, baseColor, border, totalUnits, ranges, markings, false);
 
-	//draw speed label	
+	//draw which kickoff spawn this is and its limit
+	if (packMode == PackMode::Kickoff && kickoffSpawn >= 0)
+	{
+		const KickoffSpawn& s = KICKOFF_SPAWNS[kickoffSpawn];
+		string spawnMsg = fmt::format("{0} - speedflip limit {1:.2f}s", s.name, LimitForSpawn(s));
+		canvas.SetColor(255, 255, 255, (char)(255 * opacity));
+		canvas.SetPosition(Vector2{ startPos.X, (int)(startPos.Y - 20) });
+		canvas.DrawString(spawnMsg, 1, 1, true, false);
+	}
+
+	//draw speed label
 	auto speedCvar = _globalCvarManager->getCvar("sv_soccar_gamespeed");
 	float speed = speedCvar.getFloatValue();
 	string msg = fmt::format("Game speed: {0}%", (int)(speed * 100));
@@ -689,18 +952,32 @@ void SpeedFlipTrainer::RenderAngleMeter(CanvasWrapper canvas, float screenWidth,
 	canvas.SetPosition(Vector2{ startPos.X, (int)(startPos.Y - 20) });
 	canvas.DrawString("Dodge Angle: " + to_string(attempt.dodgeAngle) + " DEG", 1, 1, true, false);
 
-	//draw time to ball label
-	if (attempt.hit && attempt.ticksToBall > 0)
+	//draw time to ball label: green if you made it within the limit, red if not
 	{
-		auto ms = attempt.ticksToBall * 1.0 / 120.0;
-		//string msg = fmt::format("Time to ball: {0:.3f}s", attempt.timeToBall);
-		string msg = fmt::format("Time to ball: {0:.4f}s", ms);
+		string msg;
+		bool good = false;
+		if (attempt.reached && attempt.ticksToBall > 0)
+		{
+			auto secs = attempt.ticksToBall * 1.0 / 120.0;
+			msg = fmt::format("Time to ball: {0:.4f}s (limit {1:.2f}s)", secs, timeLimit);
+			good = attempt.passed;
+		}
+		else if (attempt.exploded || attempt.timedOut)
+		{
+			msg = fmt::format("Too slow - limit {0:.2f}s", timeLimit);
+		}
 
-		int width = (msg.length() * 8) - (5 * 3); // 8 pixels per char - 5 pixels per space
+		if (!msg.empty())
+		{
+			int width = (msg.length() * 8) - (5 * 3); // 8 pixels per char - 5 pixels per space
 
-		canvas.SetColor(255, 255, 255, (char)(255 * opacity));
-		canvas.SetPosition(Vector2{ startPos.X + (int)(boxSize.X / 2) - (width/2), startPos.Y - 20 });
-		canvas.DrawString(msg, 1, 1, true, false);
+			if (good)
+				canvas.SetColor(50, 255, 50, (char)(255 * opacity));
+			else
+				canvas.SetColor(255, 10, 10, (char)(255 * opacity));
+			canvas.SetPosition(Vector2{ startPos.X + (int)(boxSize.X / 2) - (width/2), startPos.Y - 20 });
+			canvas.DrawString(msg, 1, 1, true, false);
+		}
 	}
 
 	string msg = fmt::format("Horizontal distance traveled: {0:.1f}", attempt.traveledY);

@@ -8,6 +8,7 @@
 
 #include "version.h"
 #include "Attempt.h"
+#include "KickoffSpawns.h"
 constexpr auto plugin_version = stringify(VERSION_MAJOR) "." stringify(VERSION_MINOR) "." stringify(VERSION_PATCH) "." stringify(VERSION_BUILD);
 
 using namespace std;
@@ -17,6 +18,14 @@ enum class SpeedFlipTrainerMode
 	Replay,
 	Bot,
 	Manual
+};
+
+// Which kind of training pack the plugin is attached to
+enum class PackMode
+{
+	None,
+	Musty,    // Musty's speedflip kickoff test
+	Kickoff   // a pack with shots on the standard kickoff spawns
 };
 
 class SpeedFlipTrainer: public BakkesMod::Plugin::BakkesModPlugin, public BakkesMod::Plugin::PluginSettingsWindow, public BakkesMod::Plugin::PluginWindow
@@ -76,6 +85,28 @@ private:
 	// Save attempts to file?
 	shared_ptr<bool> saveToFile = make_shared<bool>(false);
 
+	// Kickoff-spawn support
+	shared_ptr<bool> kickoffEnabled = make_shared<bool>(true);
+	shared_ptr<bool> kickoffAutodetect = make_shared<bool>(true);
+	shared_ptr<bool> kickoffSnap = make_shared<bool>(true);
+	shared_ptr<std::string> kickoffPackCode = make_shared<std::string>("");
+	shared_ptr<float> kickoffSnapRadius = make_shared<float>(400.0f);
+
+	// Time limits (seconds) to reach the ball from each spawn type
+	shared_ptr<float> timeCorner = make_shared<float>(2.00f);
+	shared_ptr<float> timeOffCenter = make_shared<float>(2.25f);
+	shared_ptr<float> timeCenter = make_shared<float>(2.58f);
+
+	// Musty's shot timer and car-to-ball distance, recorded when his pack runs
+	shared_ptr<float> mustyTime = make_shared<float>(0.0f);
+	shared_ptr<float> mustyDist = make_shared<float>(0.0f);
+
+	PackMode packMode = PackMode::None;
+	int kickoffSpawn = -1;      // index into KICKOFF_SPAWNS for this round, -1 if none
+	int prepTicks = 0;          // ticks spent snapping car/ball this round
+	float timeLimit = 0;        // pass/fail limit for the current attempt (seconds)
+	bool speedRestored = false; // remembered game speed applied in kickoff mode
+
 	// Whether plugin is loaded
 	bool loaded = false;
 
@@ -107,6 +138,24 @@ private:
 
 	// Determines whether Musty's training pack is loaded
 	bool IsMustysPack(TrainingEditorWrapper tw);
+
+	// Training pack code of the loaded pack, or "" if none
+	std::string GetPackCode(TrainingEditorWrapper tw);
+
+	// Kickoff mode: find the spawn this round uses and snap car/ball onto it
+	void PrepareKickoffRound(CarWrapper car);
+
+	// Kickoff mode: keep the shot clock at the limit and end the shot when it runs out
+	void EnforceKickoffLimit(int currentFrame, float timeLeft);
+
+	// Time limit for a spawn (seconds)
+	float LimitForSpawn(const KickoffSpawn& s);
+
+	// Whether the last attempt counts as a hit for the speed-change streaks
+	bool AttemptSucceeded();
+
+	// Whether there is anything to measure/draw this round
+	bool RoundActive();
 
 	// Measures the speedflip being performed
 	void Measure(CarWrapper car, shared_ptr<GameWrapper> gameWrapper);

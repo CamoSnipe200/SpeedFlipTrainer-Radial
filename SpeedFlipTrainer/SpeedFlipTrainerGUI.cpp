@@ -13,6 +13,7 @@ std::string SpeedFlipTrainer::GetPluginName() {
 //  f2 -> plugins -> SpeedFlipTrainer
 void SpeedFlipTrainer::RenderSettings() {
 	ImGui::TextUnformatted("A plugin to help give training metrics when learning how to do a speedflip in Musty's training pack: A503-264C-A7EB-D282");
+	ImGui::TextUnformatted("Also works in training packs with shots on the standard kickoff spots (see Kickoff positions below).");
 
 	CVarWrapper enableCvar = cvarManager->getCvar("sf_enabled");
 	if (!enableCvar) return;
@@ -156,6 +157,101 @@ void SpeedFlipTrainer::RenderSettings() {
 			cvar.setValue(value);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Show meter for the horizontal position.");
+	}
+
+	// ------------------------ KICKOFF POSITIONS ----------------------------------
+	ImGui::Separator();
+	ImGui::TextUnformatted("Kickoff positions");
+	{
+		const char* names[] = { "sf_kickoff_enabled", "sf_kickoff_autodetect", "sf_kickoff_snap" };
+		const char* labels[] = { "Enable kickoff spawn support", "Detect kickoff shots in any training pack", "Snap car and ball to the exact kickoff spot" };
+		const char* tips[] = {
+			"Measure speedflips from the standard kickoff spots, not just Musty's pack.",
+			"Any training shot that starts near a kickoff spot with the ball at center counts. Turn off once your pack code is set below.",
+			"Moves the car and ball onto the exact kickoff positions at the start of each shot, so the editor placement doesn't have to be perfect."
+		};
+		for (int i = 0; i < 3; i++)
+		{
+			CVarWrapper cvar = cvarManager->getCvar(names[i]);
+			if (!cvar) continue;
+			bool value = cvar.getBoolValue();
+			if (ImGui::Checkbox(labels[i], &value))
+				cvar.setValue(value);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", tips[i]);
+		}
+	}
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_kickoff_pack_code");
+		if (cvar)
+		{
+			static char codeBuf[64] = "";
+			static bool codeInit = false;
+			if (!codeInit)
+			{
+				strncpy_s(codeBuf, sizeof(codeBuf), cvar.getStringValue().c_str(), _TRUNCATE);
+				codeInit = true;
+			}
+			if (ImGui::InputText("My kickoff pack code", codeBuf, sizeof(codeBuf)))
+				cvar.setValue(std::string(codeBuf));
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Code of your kickoff-spots training pack (shown after you upload it).");
+		}
+	}
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_kickoff_snap_radius");
+		if (cvar)
+		{
+			float v = cvar.getFloatValue();
+			if (ImGui::SliderFloat("Kickoff spot detection radius", &v, 50.0f, 1000.0f, "%.0f"))
+				cvar.setValue(v);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How close (unreal units) the car has to start to a kickoff spot to count.");
+		}
+	}
+	{
+		const char* names[] = { "sf_kickoff_time_corner", "sf_kickoff_time_offcenter", "sf_kickoff_time_center" };
+		const char* labels[] = { "Corner time limit (s)", "Off-center time limit (s)", "Back center time limit (s)" };
+		for (int i = 0; i < 3; i++)
+		{
+			CVarWrapper cvar = cvarManager->getCvar(names[i]);
+			if (!cvar) continue;
+			float v = cvar.getFloatValue();
+			if (ImGui::SliderFloat(labels[i], &v, 1.5f, 3.5f, "%.2f"))
+				cvar.setValue(v);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Ball disappears and the time shows red if you take longer than this.");
+		}
+	}
+	{
+		CVarWrapper tCvar = cvarManager->getCvar("sf_musty_time");
+		CVarWrapper dCvar = cvarManager->getCvar("sf_musty_dist");
+		if (tCvar && dCvar)
+		{
+			float t = tCvar.getFloatValue();
+			float d = dCvar.getFloatValue();
+			if (t > 0 && d > 0)
+			{
+				ImGui::Text("Musty's shot: %.2fs over %.0fuu", t, d);
+				if (ImGui::Button("Use Musty-equivalent limits"))
+				{
+					const char* names[] = { "sf_kickoff_time_corner", "sf_kickoff_time_offcenter", "sf_kickoff_time_center" };
+					const float dists[] = { KICKOFF_DIST_CORNER, KICKOFF_DIST_OFFCENTER, KICKOFF_DIST_CENTER };
+					for (int i = 0; i < 3; i++)
+					{
+						CVarWrapper cvar = cvarManager->getCvar(names[i]);
+						if (cvar)
+							cvar.setValue(t + (dists[i] - d) / KICKOFF_MAX_SPEED);
+					}
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Set each limit to Musty's timer plus the extra distance at full speed (2300 uu/s).");
+			}
+			else
+			{
+				ImGui::TextUnformatted("Start one attempt in Musty's pack to calibrate the limits to it.");
+			}
+		}
 	}
 
 	// ------------------------ SPEED SETTINGS ----------------------------------

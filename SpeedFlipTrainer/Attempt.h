@@ -46,6 +46,11 @@ public:
 	bool hit = false;
 	bool exploded = false;
 
+	// Latched results (not cleared when the ball explodes after a touch)
+	bool reached = false;   // ball was touched
+	bool passed = false;    // ball was touched within the time limit
+	bool timedOut = false;  // time limit ran out before a touch
+
 	// Number of ticks not pressing boost or throttle
 	int ticksNotPressingBoost = 0;
 	int ticksNotPressingThrottle = 0;
