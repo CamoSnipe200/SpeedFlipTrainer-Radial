@@ -25,7 +25,8 @@ enum class PackMode
 {
 	None,
 	Musty,    // Musty's speedflip kickoff test
-	Kickoff   // a pack with shots on the standard kickoff spawns
+	Kickoff,  // a pack with shots on the standard kickoff spawns
+	Freeplay  // freeplay, with the plugin putting you on the kickoff spots
 };
 
 class SpeedFlipTrainer: public BakkesMod::Plugin::BakkesModPlugin, public BakkesMod::Plugin::PluginSettingsWindow, public BakkesMod::Plugin::PluginWindow
@@ -107,6 +108,18 @@ private:
 	float timeLimit = 0;        // pass/fail limit for the current attempt (seconds)
 	bool speedRestored = false; // remembered game speed applied in kickoff mode
 
+	// Freeplay kickoff practice
+	shared_ptr<bool> freeplayKickoffs = make_shared<bool>(true);
+	shared_ptr<int> freeplaySpot = make_shared<int>(0);          // 0 cycle, 1 random, 2.. a fixed spot
+	shared_ptr<float> freeplayResetDelay = make_shared<float>(2.0f); // seconds to show the result before the next kickoff
+
+	enum class FreeplayPhase { Waiting, Running, Done };
+	FreeplayPhase freeplayPhase = FreeplayPhase::Waiting;
+	int freeplayCycle = -1;          // last spot used when cycling
+	int freeplayDoneFrame = 0;       // physics frame the attempt finished on
+	bool freeplayNextRequested = false;
+	bool freeplayHookQueued = false;
+
 	// Whether plugin is loaded
 	bool loaded = false;
 
@@ -156,6 +169,24 @@ private:
 
 	// Whether there is anything to measure/draw this round
 	bool RoundActive();
+
+	// Kickoff pack or freeplay: measured from a kickoff spawn with a time limit
+	bool KickoffLike() { return packMode == PackMode::Kickoff || packMode == PackMode::Freeplay; }
+
+	// Whether the game is in the mode the plugin is currently attached to
+	bool InActiveMode();
+
+	// Streaks, game-speed changes and saving once an attempt is over
+	void FinishAttempt();
+
+	// Freeplay: choose the next kickoff spot and wait for the player to go
+	void StartFreeplayKickoff();
+
+	// Freeplay: per-tick handling. Returns false if the tick shouldn't be measured.
+	bool FreeplayTick(CarWrapper car, ControllerInput* input, int currentFrame);
+
+	// Freeplay: big good/too slow banner
+	void RenderFreeplayResult(CanvasWrapper canvas, float screenWidth, float screenHeight);
 
 	// Measures the speedflip being performed
 	void Measure(CarWrapper car, shared_ptr<GameWrapper> gameWrapper);

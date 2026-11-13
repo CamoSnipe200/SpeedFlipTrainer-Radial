@@ -13,7 +13,7 @@ std::string SpeedFlipTrainer::GetPluginName() {
 //  f2 -> plugins -> SpeedFlipTrainer
 void SpeedFlipTrainer::RenderSettings() {
 	ImGui::TextUnformatted("A plugin to help give training metrics when learning how to do a speedflip in Musty's training pack: A503-264C-A7EB-D282");
-	ImGui::TextUnformatted("Also works in training packs with shots on the standard kickoff spots (see Kickoff positions below).");
+	ImGui::TextUnformatted("Also works in freeplay (puts you on the kickoff spots) and in training packs with shots on the kickoff spots.");
 
 	CVarWrapper enableCvar = cvarManager->getCvar("sf_enabled");
 	if (!enableCvar) return;
@@ -158,6 +158,46 @@ void SpeedFlipTrainer::RenderSettings() {
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Show meter for the horizontal position.");
 	}
+
+	// ------------------------ FREEPLAY KICKOFFS ----------------------------------
+	ImGui::Separator();
+	ImGui::TextUnformatted("Freeplay kickoffs");
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_freeplay_kickoffs");
+		if (cvar)
+		{
+			bool value = cvar.getBoolValue();
+			if (ImGui::Checkbox("Kickoff speedflip practice in freeplay", &value))
+				cvar.setValue(value);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("In freeplay, puts you on a kickoff spot, starts timing when you throttle or boost, and shows whether you reached the ball in time.");
+		}
+	}
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_freeplay_spot");
+		if (cvar)
+		{
+			const char* spots[] = { "Cycle through all", "Random", "Right corner", "Left corner", "Back right", "Back left", "Back center" };
+			int value = cvar.getIntValue();
+			if (ImGui::Combo("Freeplay kickoff spot", &value, spots, IM_ARRAYSIZE(spots)))
+				cvar.setValue(value);
+		}
+	}
+	{
+		CVarWrapper cvar = cvarManager->getCvar("sf_freeplay_reset_delay");
+		if (cvar)
+		{
+			float v = cvar.getFloatValue();
+			if (ImGui::SliderFloat("Seconds before next kickoff", &v, 0.5f, 10.0f, "%.1f"))
+				cvar.setValue(v);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How long the result stays up before you're put on the next spot.");
+		}
+	}
+	if (ImGui::Button("Next kickoff now"))
+		cvarManager->executeCommand("sf_freeplay_next");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("You can also bind sf_freeplay_next to a key in BakkesMod's Bindings tab.");
 
 	// ------------------------ KICKOFF POSITIONS ----------------------------------
 	ImGui::Separator();
